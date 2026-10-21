@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -44,6 +45,16 @@ def output_path(path: Path, rel: Path, out_dir: Path | None) -> Path:
     return path.with_name(f"{path.stem}{OUTPUT_TAG}{path.suffix}")
 
 
+def write_new(dest: Path, data: bytes, replace: bool) -> None:
+    """Write dest as a fresh file, never through a symlink or hard link at that name."""
+    if replace:
+        dest.unlink(missing_ok=True)  # removes the link itself, not what it points to
+    # O_EXCL refuses any existing entry, including a symlink planted after the checks in main().
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
 def human(n: int) -> str:
     for unit in ("B", "KB", "MB"):
         if n < 1024:
@@ -85,6 +96,8 @@ def main(argv=None) -> int:
             if not path.exists():
                 raise FileNotFoundError("no such file")
             dest = output_path(path, rel, args.output)
+            if dest.is_symlink():
+                raise SkipFile(f"{dest} is a symlink")
             if dest.resolve() == path.resolve():
                 raise SkipFile("output would overwrite the input")
             if dest.exists() and not args.force:
@@ -97,7 +110,7 @@ def main(argv=None) -> int:
             after = len(data)
             if not args.dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(data)
+                write_new(dest, data, replace=args.force)
             total_before += before
             total_after += after
         except SkipFile as e:

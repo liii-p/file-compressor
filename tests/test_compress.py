@@ -1,13 +1,14 @@
 import io
 import random
 import socket
+import subprocess
 import zipfile
 
 import pikepdf
 import pytest
 from PIL import Image
 
-from filecompressor import SkipFile, cli, netguard, pdf, presets
+from filecompressor import SkipFile, cli, netguard, pdf, presets, sandbox
 from filecompressor.images import compress_image
 from filecompressor.office import compress_office
 
@@ -99,6 +100,45 @@ def test_pdf_without_ghostscript(tmp_path, monkeypatch):
     assert len(pikepdf.open(io.BytesIO(out)).pages) == 1
 
 
+def test_pdf_passes_absolute_paths_to_ghostscript(tmp_path, monkeypatch):
+    # gs reads a bare "@name" argument as a file of extra options, so never pass a bare name.
+    monkeypatch.chdir(tmp_path)
+    make_pdf(tmp_path / "@x.pdf")
+    monkeypatch.setattr(pdf.shutil, "which", lambda _: "/usr/bin/gs")
+    calls = []
+
+    def fake_run(cmd, writable):
+        calls.append(cmd)
+        raise pdf.subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(pdf, "run_offline", fake_run)
+    pdf.compress_pdf(pdf.Path("@x.pdf"), MEDIUM)
+    assert calls[0][-1] == str(tmp_path.resolve() / "@x.pdf")
+    assert all(not arg.startswith("@") for arg in calls[0])
+
+
+@pytest.mark.skipif(not sandbox.os.path.exists(sandbox.SANDBOX_EXEC), reason="needs macOS sandbox-exec")
+def test_sandbox_limits_writes_and_exec(tmp_path):
+    allowed, outside = tmp_path / "allowed", tmp_path / "outside"
+    allowed.mkdir()
+    sandbox.run_offline(["/bin/bash", "-c", f"echo ok > '{allowed}/f'"], writable=allowed)
+    assert (allowed / "f").exists()
+    with pytest.raises(subprocess.CalledProcessError):
+        sandbox.run_offline(["/bin/bash", "-c", f"echo no > '{outside}'"], writable=allowed)
+    assert not outside.exists()
+    with pytest.raises(subprocess.CalledProcessError):
+        sandbox.run_offline(["/bin/bash", "-c", "exec /usr/bin/true"], writable=allowed)
+
+
+def test_pdf_skips_ghostscript_without_sandbox(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "SANDBOX_EXEC", str(tmp_path / "missing"))
+    monkeypatch.setattr(pdf.shutil, "which", lambda _: "/usr/bin/gs")
+    src = tmp_path / "doc.pdf"
+    make_pdf(src)
+    out = pdf.compress_pdf(src, MEDIUM)  # lossless fallback, gs never run
+    assert len(pikepdf.open(io.BytesIO(out)).pages) == 1
+
+
 def test_encrypted_pdf_skipped(tmp_path):
     src = tmp_path / "doc.pdf"
     make_pdf(src)
@@ -175,6 +215,28 @@ def test_cli_output_dir_and_dry_run(tmp_path, guarded):
 
     assert cli.main([str(src), "-r", "-o", str(tmp_path / "out")]) == 0
     assert (tmp_path / "out" / "sub" / "b.png").exists()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_cli_never_writes_through_symlink(tmp_path, guarded, capsys, force):
+    (tmp_path / "a.jpg").write_bytes(encode(photo(), "JPEG", quality=100))
+    target = tmp_path / "victim"
+    (tmp_path / "a.compressed.jpg").symlink_to(target)  # dangling, so exists() is False
+
+    cli.main([str(tmp_path / "a.jpg")] + (["-f"] if force else []))
+    assert "symlink" in capsys.readouterr().out
+    assert not target.exists()
+
+
+def test_cli_force_replaces_hard_link_not_target(tmp_path, guarded):
+    (tmp_path / "a.jpg").write_bytes(encode(photo(), "JPEG", quality=100))
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    (tmp_path / "a.compressed.jpg").hardlink_to(victim)
+
+    assert cli.main([str(tmp_path / "a.jpg"), "-f"]) == 0
+    assert victim.read_text() == "keep me"
+    assert (tmp_path / "a.compressed.jpg").read_bytes()[:2] == b"\xff\xd8"
 
 
 def test_cli_reports_errors(tmp_path, guarded):

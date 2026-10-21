@@ -54,11 +54,11 @@ Other rules:
 | low | 60 | 1600 px | ≤128 colours | 72 dpi |
 
 ## How it stays offline
-- On startup, `netguard` replaces Python's socket functions so any internet connection attempt raises an error.
-- Ghostscript runs under macOS `sandbox-exec` with all network access denied.
 - Dependencies (Pillow, pikepdf) only perform local work. The network is needed only for `uv sync` and `brew install`.
+- On startup, `netguard` replaces Python's socket functions, so an internet connection attempted through Python's `socket` module raises an error. This is a tripwire against accidental network use, not a hard guarantee: native code and low-level APIs don't go through it.
+- Ghostscript runs under macOS `sandbox-exec` with network access denied. The sandbox also stops it from starting other programs or writing anywhere except a temporary folder, so a malicious PDF can't use it to reach the rest of your files. If `sandbox-exec` is missing, Ghostscript is not run and PDFs get lossless cleanup only.
 
-You can verify this by running the whole tool in a network-denying sandbox:
+For a hard guarantee, run the whole tool in a network-denying sandbox:
 ```sh
 sandbox-exec -p '(version 1)(allow default)(deny network*)' .venv/bin/fcompress FILES...
 ```

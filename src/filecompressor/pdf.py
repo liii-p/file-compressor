@@ -8,7 +8,7 @@ import pikepdf
 
 from . import SkipFile
 from .presets import Preset
-from .sandbox import run_offline
+from .sandbox import SandboxUnavailable, run_offline
 
 
 def compress_pdf(path: Path, preset: Preset) -> bytes:
@@ -24,16 +24,18 @@ def compress_pdf(path: Path, preset: Preset) -> bytes:
     gs = shutil.which("gs")
     if gs:
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "out.pdf"
+            out = Path(tmp).resolve() / "out.pdf"
             try:
+                # Absolute paths: gs treats a bare name starting with "@" as a file of
+                # extra arguments, and one starting with "-" as an option.
                 run_offline([
                     gs, "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.6",
                     f"-dPDFSETTINGS={preset.pdf_setting}",
                     "-dSAFER", "-dNOPAUSE", "-dBATCH", "-dQUIET",
-                    f"-sOutputFile={out}", str(path),
-                ])
+                    f"-sOutputFile={out}", str(path.resolve()),
+                ], writable=out.parent)
                 candidates.append(_optimize(out))
-            except subprocess.CalledProcessError:
+            except (subprocess.CalledProcessError, SandboxUnavailable):
                 pass  # fall back to the lossless result
     return min(candidates, key=len)
 
