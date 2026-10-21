@@ -1,0 +1,23 @@
+[project]
+name = "filecompressor"
+version = "0.1.0"
+description = "Compress images, PDFs and Office documents entirely offline"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pillow>=11.3",
+    "pikepdf>=9.0",
+]
+
+[project.scripts]
+fcompress = "filecompressor.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
