@@ -1,4 +1,5 @@
 import io
+import os
 import random
 import socket
 import subprocess
@@ -8,7 +9,7 @@ import pikepdf
 import pytest
 from PIL import Image
 
-from filecompressor import SkipFile, cli, netguard, pdf, presets, sandbox
+from filecompressor import SkipFile, cli, images, netguard, office, pdf, presets, sandbox
 from filecompressor.images import compress_image
 from filecompressor.office import compress_office
 
@@ -82,9 +83,12 @@ def make_pdf(path):
     photo().save(path, "PDF", resolution=600, quality=95)
 
 
+needs_gs = pytest.mark.skipif(not pdf.find_ghostscript(), reason="Ghostscript not installed")
+needs_sandbox = pytest.mark.skipif(not os.path.exists(sandbox.SANDBOX_EXEC), reason="needs macOS sandbox-exec")
+
+
+@needs_gs
 def test_pdf_with_ghostscript(tmp_path):
-    if not pdf.shutil.which("gs"):
-        pytest.skip("Ghostscript not installed")
     src = tmp_path / "doc.pdf"
     make_pdf(src)
     out = pdf.compress_pdf(src, MEDIUM)
@@ -93,50 +97,96 @@ def test_pdf_with_ghostscript(tmp_path):
 
 
 def test_pdf_without_ghostscript(tmp_path, monkeypatch):
-    monkeypatch.setattr(pdf.shutil, "which", lambda _: None)
+    monkeypatch.setattr(pdf, "find_ghostscript", lambda: None)
     src = tmp_path / "doc.pdf"
     make_pdf(src)
     out = pdf.compress_pdf(src, MEDIUM)
     assert len(pikepdf.open(io.BytesIO(out)).pages) == 1
 
 
-def test_pdf_passes_absolute_paths_to_ghostscript(tmp_path, monkeypatch):
-    # gs reads a bare "@name" argument as a file of extra options, so never pass a bare name.
-    monkeypatch.chdir(tmp_path)
-    make_pdf(tmp_path / "@x.pdf")
-    monkeypatch.setattr(pdf.shutil, "which", lambda _: "/usr/bin/gs")
+@pytest.fixture
+def gs_calls(monkeypatch):
+    """Record Ghostscript command lines instead of running them."""
     calls = []
 
-    def fake_run(cmd, writable):
+    def fake_run(cmd, **kwargs):
         calls.append(cmd)
         raise pdf.subprocess.CalledProcessError(1, cmd)
 
+    monkeypatch.setattr(pdf, "find_ghostscript", lambda: "/opt/homebrew/bin/gs")
     monkeypatch.setattr(pdf, "run_offline", fake_run)
+    return calls
+
+
+def test_pdf_passes_absolute_paths_to_ghostscript(tmp_path, monkeypatch, gs_calls):
+    # gs reads a bare "@name" argument as a file of extra options, so never pass a bare name.
+    monkeypatch.chdir(tmp_path)
+    make_pdf(tmp_path / "@x.pdf")
     pdf.compress_pdf(pdf.Path("@x.pdf"), MEDIUM)
-    assert calls[0][-1] == str(tmp_path.resolve() / "@x.pdf")
-    assert all(not arg.startswith("@") for arg in calls[0])
+    assert gs_calls[0][-1] == str(tmp_path.resolve() / "@x.pdf")
+    assert all(not arg.startswith("@") for arg in gs_calls[0])
 
 
-@pytest.mark.skipif(not sandbox.os.path.exists(sandbox.SANDBOX_EXEC), reason="needs macOS sandbox-exec")
-def test_sandbox_limits_writes_and_exec(tmp_path):
-    allowed, outside = tmp_path / "allowed", tmp_path / "outside"
-    allowed.mkdir()
-    sandbox.run_offline(["/bin/bash", "-c", f"echo ok > '{allowed}/f'"], writable=allowed)
-    assert (allowed / "f").exists()
-    with pytest.raises(subprocess.CalledProcessError):
-        sandbox.run_offline(["/bin/bash", "-c", f"echo no > '{outside}'"], writable=allowed)
-    assert not outside.exists()
-    with pytest.raises(subprocess.CalledProcessError):
-        sandbox.run_offline(["/bin/bash", "-c", "exec /usr/bin/true"], writable=allowed)
+def test_pdf_skips_ghostscript_for_postscript(tmp_path, gs_calls):
+    # qpdf tolerates junk before the header, so this opens as a PDF; gs would run it as PostScript.
+    src = tmp_path / "doc.pdf"
+    make_pdf(src)
+    src.write_bytes(b"%!PS-Adobe-3.0\n" + src.read_bytes())
+    out = pdf.compress_pdf(src, MEDIUM)
+    assert gs_calls == []
+    assert len(pikepdf.open(io.BytesIO(out)).pages) == 1
+
+
+def run_bash(script, tmp_path, readable=(), timeout=30):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir(exist_ok=True)
+    return sandbox.run_offline(["/bin/bash", "-c", script], writable=allowed,
+                               readable=["/bin", *readable], timeout=timeout)
+
+
+@needs_sandbox
+def test_sandbox_limits_reads_writes_exec_and_network(tmp_path):
+    secret, input_file = tmp_path / "secret", tmp_path / "input"
+    secret.write_text("secret\n")
+    input_file.write_text("input\n")  # `read` fails at a missing final newline
+    run_bash(f"echo ok > '{tmp_path}/allowed/f'", tmp_path)
+    assert (tmp_path / "allowed" / "f").exists()
+    run_bash(f"read line < '{input_file}'", tmp_path, readable=[input_file])
+    for script in [f"echo no > '{tmp_path}/new'", f"read line < '{secret}'",
+                   "exec /usr/bin/true", "exec 3<>/dev/tcp/1.1.1.1/80"]:
+        with pytest.raises(subprocess.CalledProcessError):
+            run_bash(script, tmp_path)
+    assert not (tmp_path / "new").exists()
+
+
+@needs_sandbox
+def test_sandbox_timeout(tmp_path):
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_bash("while :; do :; done", tmp_path, timeout=1)
 
 
 def test_pdf_skips_ghostscript_without_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "SANDBOX_EXEC", str(tmp_path / "missing"))
-    monkeypatch.setattr(pdf.shutil, "which", lambda _: "/usr/bin/gs")
+    monkeypatch.setattr(pdf, "find_ghostscript", lambda: "/opt/homebrew/bin/gs")
     src = tmp_path / "doc.pdf"
     make_pdf(src)
     out = pdf.compress_pdf(src, MEDIUM)  # lossless fallback, gs never run
     assert len(pikepdf.open(io.BytesIO(out)).pages) == 1
+
+
+def test_image_pixel_limit(monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    for size in [(40, 40), (100, 100)]:  # Pillow warns above the limit, errors above twice it
+        with pytest.raises(SkipFile, match="larger than"):
+            compress_image(encode(photo(size), "PNG"), "PNG", MEDIUM)
+
+
+def test_image_frame_limit(monkeypatch):
+    monkeypatch.setattr(images, "MAX_FRAMES", 2)
+    frames = [photo((50, 50)).rotate(angle).quantize(64) for angle in (0, 90, 180)]
+    src = encode(frames[0], "GIF", save_all=True, append_images=frames[1:], duration=100)
+    with pytest.raises(SkipFile, match="frames"):
+        compress_image(src, "GIF", MEDIUM)
 
 
 def test_encrypted_pdf_skipped(tmp_path):
@@ -171,6 +221,25 @@ def test_office_recompresses_media():
 def test_office_rejects_non_zip():
     with pytest.raises(SkipFile):
         compress_office(b"not a zip", MEDIUM)
+
+
+def zip_infos(sizes):
+    infos = []
+    for i, size in enumerate(sizes):
+        info = zipfile.ZipInfo(f"f{i}")
+        info.file_size = size
+        infos.append(info)
+    return infos
+
+
+@pytest.mark.parametrize("sizes,match", [([300 << 20], "zip bomb"), ([1] * 50_001, "entries")])
+def test_office_expansion_limits(sizes, match):
+    with pytest.raises(SkipFile, match=match):
+        office._check_expansion(zip_infos(sizes), size=1 << 20)
+
+
+def test_office_expansion_allows_large_real_files():
+    office._check_expansion(zip_infos([900 << 20, 200 << 20]), size=1 << 30)  # a 1 GB pptx
 
 
 @pytest.fixture

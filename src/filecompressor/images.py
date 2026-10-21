@@ -1,9 +1,18 @@
 import io
+import os
+import warnings
 
 from PIL import Image, ImageOps, ImageSequence, features
 
 from . import SkipFile
 from .presets import Preset
+
+# Decompression bomb limits, in pixels rather than bytes: 300 MP covers large
+# scans and panoramas (about 1.2 GB as RGBA). Pillow only warns between 1x and
+# 2x its limit, so compress_image turns that warning into a skip.
+Image.MAX_IMAGE_PIXELS = 300_000_000
+MAX_FRAMES = 2000
+MAX_FRAME_PIXELS = 1_000_000_000  # summed over all frames
 
 FORMATS = {
     ".jpg": "JPEG",
@@ -18,8 +27,7 @@ FORMATS = {
 
 
 def format_for(name: str) -> str | None:
-    dot = name.rfind(".")
-    return FORMATS.get(name[dot:].lower()) if dot != -1 else None
+    return FORMATS.get(os.path.splitext(name)[1].lower())
 
 
 def compress_image(data: bytes, fmt: str, preset: Preset, embedded: bool = False) -> bytes:
@@ -32,7 +40,14 @@ def compress_image(data: bytes, fmt: str, preset: Preset, embedded: bool = False
     if fmt == "AVIF" and not features.check("avif"):
         raise SkipFile("this Pillow build has no AVIF support")
 
-    with Image.open(io.BytesIO(data)) as im:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            im = Image.open(io.BytesIO(data))
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError):
+        raise SkipFile(f"image is larger than {Image.MAX_IMAGE_PIXELS} pixels") from None
+
+    with im:
         if getattr(im, "n_frames", 1) > 1:
             return _save_frames(im, fmt, preset)
 
@@ -89,8 +104,13 @@ def _save_png(im, preset, icc) -> bytes:
 
 def _save_frames(im: Image.Image, fmt: str, preset: Preset) -> bytes:
     """Animated GIF/WebP and multi-page TIFF: re-encode every frame."""
-    frames, durations = [], []
+    if im.n_frames > MAX_FRAMES:
+        raise SkipFile(f"has {im.n_frames} frames, more than {MAX_FRAMES}")
+    frames, durations, pixels = [], [], 0
     for frame in ImageSequence.Iterator(im):
+        pixels += frame.width * frame.height
+        if pixels > MAX_FRAME_PIXELS:
+            raise SkipFile(f"frames add up to more than {MAX_FRAME_PIXELS} pixels")
         durations.append(frame.info.get("duration", 100))
         frames.append(_resize(frame.convert("RGBA"), preset.max_dim))
     first, rest = frames[0], frames[1:]

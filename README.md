@@ -56,12 +56,20 @@ Other rules:
 ## How it stays offline
 - Dependencies (Pillow, pikepdf) only perform local work. The network is needed only for `uv sync` and `brew install`.
 - On startup, `netguard` replaces Python's socket functions, so an internet connection attempted through Python's `socket` module raises an error. This is a tripwire against accidental network use, not a hard guarantee: native code and low-level APIs don't go through it.
-- Ghostscript runs under macOS `sandbox-exec` with network access denied. The sandbox also stops it from starting other programs or writing anywhere except a temporary folder, so a malicious PDF can't use it to reach the rest of your files. If `sandbox-exec` is missing, Ghostscript is not run and PDFs get lossless cleanup only.
+- Ghostscript, the part most often targeted by malicious PDFs, runs under macOS `sandbox-exec`. It can't:
+  - use the network;
+  - start other programs;
+  - read anything except the PDF it's given and its own files (it can see other files' names and sizes, but not their contents);
+  - write anywhere except a temporary folder.
+- Ghostscript is only run from Homebrew (`/opt/homebrew/bin/gs` or `/usr/local/bin/gs`), only on files that start as a PDF, and is stopped after 2 minutes plus 1 minute per 100 MB. If `sandbox-exec` is missing or Ghostscript fails, PDFs get lossless cleanup only.
+- Files that expand enormously when unpacked are skipped: images over 300 megapixels, animations over 2000 frames, and Office files whose contents are over 100× (or 256 MB) larger than the file.
 
 For a hard guarantee, run the whole tool in a network-denying sandbox:
 ```sh
 sandbox-exec -p '(version 1)(allow default)(deny network*)' .venv/bin/fcompress FILES...
 ```
+
+Metadata is not removed. Compressed files keep the PDF title and author, Office document properties, and the EXIF data (which can include GPS location) of images embedded in Office files.
 
 ## Development
 ```sh

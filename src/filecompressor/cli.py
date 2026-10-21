@@ -27,16 +27,14 @@ def compress_file(path: Path, preset: presets.Preset) -> bytes:
 def discover(paths: list[Path], recursive: bool):
     """Yield (file, path relative to the argument it came from)."""
     for root in paths:
-        if root.is_file():
-            yield root, Path(root.name)
-        elif root.is_dir():
+        if root.is_dir():
             files = root.rglob("*") if recursive else root.iterdir()
             for f in sorted(files):
                 if (f.is_file() and f.suffix.lower() in SUPPORTED
                         and not f.name.startswith(".") and not f.stem.endswith(OUTPUT_TAG)):
                     yield f, f.relative_to(root)
         else:
-            yield root, Path(root.name)  # reported as missing below
+            yield root, Path(root.name)  # a file, or reported as missing in main()
 
 
 def output_path(path: Path, rel: Path, out_dir: Path | None) -> Path:
