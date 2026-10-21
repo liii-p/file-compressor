@@ -3,6 +3,8 @@ Local app to compress files/images. Runs entirely on your machine and never cont
 
 Supports JPEG, PNG, WebP, AVIF, GIF (including animated), TIFF, PDF, and Office documents (docx/pptx/xlsx, by recompressing their embedded images).
 
+Built with Claude Code.
+
 ## Install (macOS)
 ```sh
 brew install uv ghostscript
